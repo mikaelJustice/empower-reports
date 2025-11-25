@@ -1588,25 +1588,48 @@ if not st.session_state.logged_in:
 
     st.sidebar.header("Login")
     
-    with st.sidebar.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submit = st.form_submit_button("Login")
-        
-        if submit:
-            session = Session()
-            user = session.query(User).filter_by(email=username).first()
+    # Login tabs: Normal login and Master Admin Recovery
+    login_tab, recovery_tab = st.sidebar.tabs(["Login", "Master Admin"])
+    
+    with login_tab:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Login")
             
-            if user and user.password_hash == hashlib.sha256(password.encode()).hexdigest():
+            if submit:
+                session = Session()
+                user = session.query(User).filter_by(email=username).first()
+                
+                if user and user.password_hash == hashlib.sha256(password.encode()).hexdigest():
+                    st.session_state.logged_in = True
+                    st.session_state.user_role = user.role
+                    st.session_state.user_id = user.id
+                    st.session_state.username = user.name
+                    session.close()
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password")
+                    session.close()
+    
+    with recovery_tab:
+        st.warning("⚠️ Master Admin Recovery - Use only if you forgot your password!")
+        master_password = st.text_input("Master Admin Password", type="password", key="master_pw")
+        
+        if st.button("Unlock Master Admin", key="master_unlock"):
+            master_hash = hashlib.sha256("@mikaelJ46".encode()).hexdigest()
+            
+            if hashlib.sha256(master_password.encode()).hexdigest() == master_hash:
                 st.session_state.logged_in = True
-                st.session_state.user_role = user.role
-                st.session_state.user_id = user.id
-                st.session_state.username = user.name
-                session.close()
+                st.session_state.user_role = "master_admin"
+                st.session_state.user_id = None
+                st.session_state.username = "Master Admin"
+                st.success("✅ Master Admin access granted!")
+                st.info("You can now reset the database and recreate admin accounts.")
+                time.sleep(1)
                 st.rerun()
             else:
-                st.error("Invalid username or password")
-                session.close()
+                st.error("❌ Incorrect master admin password")
     
     # removed duplicate sidebar motto and decorative info line
     session.close()
@@ -1642,7 +1665,13 @@ st.sidebar.title(f"Role: {st.session_state.user_role.title()}")
 # AI Chat UI removed
 
 
-if st.session_state.user_role == 'admin':
+if st.session_state.user_role == 'master_admin':
+    page = st.sidebar.selectbox("Master Admin Menu", [
+        "Master Admin Dashboard",
+        "Reset Database",
+        "Logout"
+    ])
+elif st.session_state.user_role == 'admin':
     page = st.sidebar.selectbox("Menu", [
         "Dashboard", 
         "Performance Analytics",  # New menu item
@@ -1674,6 +1703,124 @@ else:
         "Communications",
         "Change Login Details"
     ])
+
+# ============================================
+# MASTER ADMIN PAGES (Special Access Level)
+# ============================================
+
+if st.session_state.user_role == 'master_admin':
+    if page == "Master Admin Dashboard":
+        st.header("🔐 Master Admin Dashboard")
+        st.warning("⚠️ You have full system access. Use with caution!")
+        
+        col1, col2, col3 = st.columns(3)
+        session = Session()
+        with col1:
+            st.metric("Total Users", session.query(User).count())
+        with col2:
+            st.metric("Total Students", session.query(Student).count())
+        with col3:
+            st.metric("Total Terms", session.query(AcademicTerm).count())
+        session.close()
+        
+        st.markdown("---")
+        st.subheader("Available Actions")
+        st.markdown("""
+        - **Reset Database**: Wipe all data and start fresh
+        - **View Logs**: Access system audit logs
+        
+        Use the menu to select an action.
+        """)
+    
+    elif page == "Reset Database":
+        st.header("🗑️  Factory Reset Database")
+        st.error("⚠️ WARNING: This will DELETE ALL data and create a fresh database!")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Step 1: Backup Current Database")
+            if st.button("Create Backup Before Reset", key="create_backup"):
+                success, msg = backup_database()
+                if success:
+                    st.success(f"✅ {msg}")
+                else:
+                    st.error(f"❌ {msg}")
+        
+        with col2:
+            st.subheader("Step 2: Confirm Reset")
+            confirm_text = st.text_input("Type 'DELETE ALL DATA' to confirm reset:")
+            
+            if confirm_text == "DELETE ALL DATA":
+                confirm_password = st.text_input("Enter master admin password to proceed:", type="password")
+                
+                if st.button("PERMANENTLY DELETE ALL DATA", key="confirm_reset"):
+                    master_hash = hashlib.sha256("@mikaelJ46".encode()).hexdigest()
+                    
+                    if hashlib.sha256(confirm_password.encode()).hexdigest() == master_hash:
+                        st.warning("🔄 Resetting database... Please wait")
+                        
+                        try:
+                            # Auto backup before deletion
+                            backup_database()
+                            
+                            # Close all connections
+                            session = Session()
+                            session.close()
+                            ENGINE.dispose()
+                            
+                            # Delete the database file
+                            if DB_PATH.exists():
+                                os.remove(DB_PATH)
+                            
+                            # Recreate the database
+                            Base.metadata.drop_all(ENGINE)
+                            Base.metadata.create_all(ENGINE)
+                            update_database_schema()
+                            seed_default_behavior_components()
+                            init_report_design()
+                            init_admin()
+                            
+                            # Log the reset action
+                            session = Session()
+                            log_audit(session, None, "MASTER_ADMIN_RESET", "Factory reset performed via master admin")
+                            session.close()
+                            
+                            st.success("✅ Database successfully reset to factory defaults!")
+                            st.info("New Admin Credentials:\n- Username: `admin`\n- Password: `admin123`")
+                            st.info("You will be logged out. Please login again with the new credentials.")
+                            time.sleep(2)
+                            st.session_state.logged_in = False
+                            st.rerun()
+                        
+                        except Exception as e:
+                            st.error(f"❌ Error during reset: {str(e)}")
+                            st.error("Database may be in an inconsistent state. Please restore from backup.")
+                    else:
+                        st.error("❌ Incorrect master admin password")
+            else:
+                st.info("Enter the confirmation text to proceed.")
+        
+        st.markdown("---")
+        st.subheader("Recent Backups")
+        backups = list_backups()
+        if backups:
+            for backup in backups[:5]:  # Show last 5
+                st.text(f"📦 {backup['name']} - {backup['date']} ({backup['size']/1024/1024:.2f} MB)")
+        else:
+            st.info("No backups found yet.")
+    
+    elif page == "Logout":
+        st.session_state.logged_in = False
+        st.session_state.user_role = None
+        st.rerun()
+
+# End master admin pages
+elif st.session_state.user_role in ['admin', 'teacher']:
+    # Regular user pages continue below
+    pass
+
+# If we got here, continue with normal routing
 
 # -------------------------------
 # 10. PAGES - Dashboard
